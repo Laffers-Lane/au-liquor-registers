@@ -1,21 +1,39 @@
-import re,sys,time,json,csv,io,os,html
+import re,sys,time,json,csv,io,os,html,zipfile
+import xml.etree.ElementTree as ET
 import urllib.request as U
 os.makedirs('data',exist_ok=True)
 H={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36','Accept':'*/*'}
 def get(url,binary=False):
     r=U.urlopen(U.Request(url,headers=H),timeout=300); b=r.read()
     return b if binary else b.decode('utf-8','replace')
+NS={'m':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+def col_idx(ref):
+    n=0
+    for ch in re.match(r'[A-Z]+',ref).group(0): n=n*26+ord(ch)-64
+    return n-1
 def xlsx_to_csv(path,out):
-    from openpyxl import load_workbook
-    wb=load_workbook(path,read_only=True,data_only=True)
+    z=zipfile.ZipFile(path)
+    shared=[]
+    if 'xl/sharedStrings.xml' in z.namelist():
+        for si in ET.fromstring(z.read('xl/sharedStrings.xml')).findall('m:si',NS):
+            shared.append(''.join(t.text or '' for t in si.iter('{%s}t'%NS['m'])))
+    sheet=[n for n in z.namelist() if n.startswith('xl/worksheets/sheet')][0]
     n=0
     with open(out,'w',newline='',encoding='utf-8') as f:
         w=csv.writer(f)
-        for ws in wb.worksheets:
-            for row in ws.iter_rows(values_only=True):
-                if any(c is not None and str(c).strip()!='' for c in row):
-                    w.writerow(['' if c is None else c for c in row]); n+=1
-            break
+        for ev,el in ET.iterparse(io.BytesIO(z.read(sheet))):
+            if el.tag=='{%s}row'%NS['m']:
+                row=[]
+                for c in el.findall('m:c',NS):
+                    i=col_idx(c.get('r','A'))
+                    while len(row)<=i: row.append('')
+                    v=c.find('m:v',NS); t=c.get('t')
+                    if t=='s' and v is not None: row[i]=shared[int(v.text)]
+                    elif t=='inlineStr':
+                        row[i]=''.join(x.text or '' for x in c.iter('{%s}t'%NS['m']))
+                    elif v is not None: row[i]=v.text
+                if any(x!='' for x in row): w.writerow(row); n+=1
+                el.clear()
     print('converted',path,n,'rows')
 # VIC: latest "Victorian liquor licences by location" xlsx (links on the DataVic page)
 try:
@@ -38,7 +56,7 @@ try:
     open(f'data/nsw_premises.{ext}','wb').write(b); print('NSW saved',l,len(b))
     if ext=='xlsx': xlsx_to_csv('data/nsw_premises.xlsx','data/nsw_premises.csv')
 except Exception as e: print('NSW fail',e)
-# ABR entity names: skip if already done this month
+# ABR entity names: skip if already done
 if os.path.exists('data/abr_entities.csv') and os.environ.get('REFRESH_ABR','')!='1':
     print('ABR exists, skipping'); sys.exit(0)
 abns=[a.strip() for a in open('abns.txt') if a.strip()]
